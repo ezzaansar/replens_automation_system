@@ -21,6 +21,7 @@ Tracks Amazon products (ASINs) for replens opportunities.
 |---|---|---|
 | `asin` | String(10) | **PK**. Amazon Standard Identification Number |
 | `upc` | String(14) | Universal Product Code (nullable) |
+| `sku` | String(40) | Amazon SKU for price updates (nullable) |
 | `title` | String(500) | Product title |
 | `category` | String(200) | Amazon category |
 | `current_price` | Numeric(10,2) | Current selling price |
@@ -39,7 +40,7 @@ Tracks Amazon products (ASINs) for replens opportunities.
 | `created_at` | DateTime | Record creation time |
 | `last_updated` | DateTime | Last update time (auto) |
 
-**Indexes:** `asin`, `upc`, `(status, opportunity_score)`, `is_underserved`
+**Indexes:** `asin`, `upc`, `sku`, `(status, opportunity_score)`, `is_underserved`
 
 ### `suppliers`
 

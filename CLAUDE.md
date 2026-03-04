@@ -27,7 +27,7 @@ src/
     phase_1_setup.py   # [IMPLEMENTED] DB init, config validation, API tests
     phase_2_discovery.py  # [IMPLEMENTED] Keepa discovery, feature extraction, ML scoring
     phase_3_sourcing.py   # [IMPLEMENTED] Supplier matching, profitability, PO generation
-    phase_4_repricing.py  # [STUB] Dynamic repricing
+    phase_4_repricing.py  # [IMPLEMENTED] Dynamic repricing (Buy Box optimization)
     phase_5_forecasting.py # [STUB] Inventory forecasting
   models/
     base.py            # SQLAlchemy declarative base
@@ -41,7 +41,7 @@ src/
     product_service.py   # Product CRUD operations
     supplier_service.py  # Supplier CRUD operations
     order_service.py     # Purchase order operations
-    performance_service.py # Performance recording
+    performance_service.py # Performance recording + repricing actions
   dashboard/
     app.py             # Streamlit stub
   utils/
@@ -70,7 +70,7 @@ uv run streamlit run src/dashboard/app.py      # Dashboard (stub)
 1. **Phase 1 (Setup):** DB init, config validation, API connection tests
 2. **Phase 2 (Discovery):** Keepa product_finder -> feature extraction from `product['data']` dict -> weighted scoring -> save to DB. Products with score >= 50 marked `is_underserved=True`.
 3. **Phase 3 (Sourcing):** For each underserved product: enrich UPC via SP-API, get supplier suggestions (OpenAI or rule-based COGS estimation), calculate profitability, select preferred supplier, initialize inventory, generate POs.
-4. **Phase 4 (Repricing):** Stub - not implemented
+4. **Phase 4 (Repricing):** For each product with inventory + preferred supplier: calculate price floor from supplier cost, fetch Buy Box price via SP-API, undercut by `price_adjustment_amount` ($0.01), clamp to floor, apply via SP-API (or log in `dry_run` mode), record to Performance table. Disables SP-API pricing calls on 403.
 5. **Phase 5 (Forecasting):** Stub - not implemented
 
 ## Key Configuration (.env)
@@ -85,8 +85,7 @@ uv run streamlit run src/dashboard/app.py      # Dashboard (stub)
 
 - SP-API returns 403 on most endpoints (client needs to enable roles: Product Listing, Product Pricing, Product Fees, FBA Inventory, Orders, Feeds)
 - OpenAI key in .env is placeholder — falls back to rule-based supplier estimation
-- No tests exist yet
-- Phases 4 & 5 are stubs
+- Phase 5 is a stub
 - Dashboard is a stub
 - No scheduler implemented (referenced in docs but `scheduler.py` doesn't exist)
 

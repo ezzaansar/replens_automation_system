@@ -107,21 +107,52 @@ uv run python src/phases/phase_3_sourcing.py
 ## Phase 4: Dynamic Repricing
 
 **File:** `src/phases/phase_4_repricing.py`
-**Status:** Stub (not implemented)
+**Status:** Implemented
 
-### Planned Functionality
+Monitors competitor prices, adjusts our prices to win the Buy Box, and enforces a cost-based price floor to protect margins.
 
-- Monitor competitor pricing via Keepa and SP-API
-- Algorithmic repricing with Buy Box optimization
-- Price bounds: min price from `calculate_min_price()`, max from market tolerance
-- Integration options: Eva.guru, BQool, or custom rules engine
-- Configuration: `TARGET_BUY_BOX_WIN_RATE`, `PRICE_ADJUSTMENT_FREQUENCY`, `PRICE_ADJUSTMENT_AMOUNT`
+### Workflow
 
-### Existing Support
+For each eligible product (active, has inventory with `current_stock > 0`, has a preferred supplier):
 
-- `utils/profitability.py` has `calculate_min_price()` ready
-- `amazon_sp_api.py` has `update_price()`, `get_product_pricing()`, `get_my_price()`
-- Config has pricing constants and fee tables
+1. **Calculate Price Floor** — `calculate_min_price(preferred_supplier.total_cost, category)` from `utils/profitability.py`. Ensures we never sell below minimum margin threshold.
+2. **Fetch Competitor Pricing** — `sp_api.get_product_pricing(asin)` for Buy Box price + `sp_api.get_my_price(asin)` for our current offer.
+3. **Decide Action:**
+   - We own the Buy Box → no change
+   - Our price is at or below Buy Box → no change (seller-metrics issue; undercutting won't help)
+   - Our price > Buy Box → target = `buy_box_price - price_adjustment_amount` ($0.01)
+   - Clamp target to price floor (never go below)
+   - Validate with `validate_price()`
+4. **Apply** — In `dry_run` mode: log only. Otherwise: `sp_api.update_price(sku, new_price)` and update `product.current_price` in DB. Uses `product.sku` if set, falls back to ASIN.
+5. **Record** — Writes pricing snapshot to Performance table via `record_repricing_action()` regardless of action taken.
+
+### Error Handling
+
+- SP-API 403 on first pricing call → disables all pricing API calls for the rest of the run (avoids hammering a forbidden endpoint)
+- Each product wrapped in try/except with `session.rollback()` — one product's failure doesn't abort the run
+
+### Key Classes / Functions
+
+- `RepricingEngine` — main engine (context manager)
+  - `calculate_price_floor(product)` → `Decimal` or `None`
+  - `get_competitor_pricing(asin)` → `dict` or `None`
+  - `determine_new_price(product, competitor_data, price_floor)` → `Decimal` or `None`
+  - `reprice_product(product)` → result dict
+  - `run(limit=100)` → summary stats dict
+- `get_repriceable_products()` — service query (active + inventory + preferred supplier)
+- `record_repricing_action()` — writes pricing snapshot to Performance table
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `PRICE_ADJUSTMENT_AMOUNT` | `0.01` | Amount to undercut Buy Box ($0.01) |
+| `TARGET_BUY_BOX_WIN_RATE` | `0.90` | Target Buy Box ownership (90%) |
+| `DRY_RUN` | `false` | Log repricing decisions without applying |
+
+```bash
+uv run python src/phases/phase_4_repricing.py
+```
 
 ---
 

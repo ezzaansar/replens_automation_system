@@ -24,8 +24,8 @@ cp .env.example .env
 | Variable | Default | Description |
 |---|---|---|
 | `OPENAI_API_KEY` | None | Enhances Phase 3 supplier suggestions. Falls back to rule-based estimation if absent. |
-| `EVA_GURU_API_KEY` | None | Eva.guru repricing integration (Phase 4, not implemented) |
-| `BQOOL_API_KEY` | None | BQool repricing integration (Phase 4, not implemented) |
+| `EVA_GURU_API_KEY` | None | Eva.guru repricing integration (reserved for future use) |
+| `BQOOL_API_KEY` | None | BQool repricing integration (reserved for future use) |
 
 ## Database
 
