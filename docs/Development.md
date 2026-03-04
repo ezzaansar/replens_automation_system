@@ -53,7 +53,7 @@ uv run mypy src/                 # Type check
 
 - **Package manager:** `uv` (not pip)
 - **Python version:** 3.12+ (set in `.python-version`)
-- **Database:** SQLAlchemy ORM, models in `src/database.py`
+- **Database:** SQLAlchemy ORM models in `src/models/`, engine/CRUD in `src/database.py`, domain services in `src/services/`
 - **Config:** Pydantic Settings from `.env`, accessed via `settings` singleton
 - **Logging:** `logging` module, output to file + console
 - **API wrappers:** Singleton pattern via `get_*()` functions
@@ -87,7 +87,7 @@ sqlite3 replens_automation.db "SELECT asin, opportunity_score, is_underserved FR
 ### Known Technical Debt
 
 - `datetime.utcnow()` used in some modules (deprecated in Python 3.12, use `datetime.now(timezone.utc)`)
-- `declarative_base()` in database.py (legacy, should use `DeclarativeBase` class)
+- `declarative_base()` in `src/models/base.py` (legacy, could migrate to `DeclarativeBase` class)
 - Bare `except:` in `amazon_sp_api.py:260`
 - `config.py` runs `Settings()` at import time — crashes without valid `.env`
 - Duplicate `logging.basicConfig()` calls in phase modules (should use `utils/logger.py`)

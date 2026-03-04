@@ -33,11 +33,13 @@ Runs phases 1-5 sequentially. Aborts if Phase 1 or 2 fails.
 - Business constants: Amazon fee tables, COGS estimates, thresholds
 - Singleton `settings` instance used throughout the codebase
 
-### Database (`src/database.py`)
+### Database (`src/database.py` + `src/models/`)
 
-- SQLAlchemy ORM with 6 tables (see [Database.md](Database.md))
+- ORM models in `src/models/` (one file per model, shared `Base` in `base.py`)
+- Engine, session factory, and `DatabaseOperations` CRUD facade in `src/database.py`
+- Domain service functions in `src/services/` (product, supplier, order, performance)
+- 6 tables (see [Database.md](Database.md))
 - SQLite (dev) or PostgreSQL (prod), configured via `DATABASE_URL`
-- `DatabaseOperations` class provides high-level CRUD methods
 - Engine created at import time based on `DATABASE_TYPE`
 
 ### API Wrappers (`src/api_wrappers/`)

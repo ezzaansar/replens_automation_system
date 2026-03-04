@@ -19,7 +19,7 @@ Automated Amazon FBA replenishment platform. Discovers profitable products via K
 src/
   main.py              # Orchestrates all phases sequentially
   config.py            # Pydantic Settings + business constants
-  database.py          # SQLAlchemy ORM models + CRUD operations
+  database.py          # Engine, session factory, DatabaseOperations facade
   api_wrappers/
     amazon_sp_api.py   # SP-API: auth, pricing, inventory, orders, fees
     keepa_api.py       # Keepa: product_finder, best_sellers, product data
@@ -30,14 +30,25 @@ src/
     phase_4_repricing.py  # [STUB] Dynamic repricing
     phase_5_forecasting.py # [STUB] Inventory forecasting
   models/
+    base.py            # SQLAlchemy declarative base
+    product.py         # Product ORM model
+    supplier.py        # Supplier + ProductSupplier ORM models
+    inventory.py       # Inventory ORM model
+    purchase_order.py  # PurchaseOrder ORM model
+    performance.py     # Performance ORM model
     discovery_model.py # Weighted scoring model (not true ML yet)
+  services/
+    product_service.py   # Product CRUD operations
+    supplier_service.py  # Supplier CRUD operations
+    order_service.py     # Purchase order operations
+    performance_service.py # Performance recording
   dashboard/
     app.py             # Streamlit stub
   utils/
     logger.py          # Centralized logging setup
     profitability.py   # Fee estimation, profit math, threshold checks
     validators.py      # ASIN/UPC/price validation, PO ID generation
-tests/                 # Empty (no tests written yet)
+tests/                 # Test suite (pytest)
 docs/                  # Project documentation
 ```
 

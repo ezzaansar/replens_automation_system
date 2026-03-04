@@ -1,6 +1,6 @@
 # Database Schema
 
-SQLAlchemy ORM models defined in `src/database.py`. Supports SQLite (dev) and PostgreSQL (prod).
+SQLAlchemy ORM models defined in `src/models/` (one file per model). Engine, session factory, and CRUD facade in `src/database.py`. Supports SQLite (dev) and PostgreSQL (prod).
 
 ## Entity Relationship
 
@@ -157,6 +157,8 @@ Daily per-product sales and profit metrics.
 
 ```python
 from src.database import init_db, DatabaseOperations, SessionLocal
+# Or import models from their canonical location:
+from src.models import Product, Supplier, Inventory
 
 # Initialize tables
 init_db()
