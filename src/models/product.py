@@ -16,6 +16,7 @@ class Product(Base):
 
     asin = Column(String(10), primary_key=True, index=True)
     upc = Column(String(14), nullable=True, index=True)
+    sku = Column(String(40), nullable=True, index=True)
     title = Column(String(500))
     category = Column(String(200))
 
