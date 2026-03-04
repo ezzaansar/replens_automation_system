@@ -8,6 +8,7 @@ Provides a clean, high-level interface to the Keepa API for:
 """
 
 import logging
+import threading
 from typing import Dict, List, Any, Optional
 
 import keepa
@@ -47,7 +48,7 @@ class KeepaAPI:
             logger.error(f"✗ Failed to initialize Keepa API: {e}")
             raise
 
-    def get_product_data(self, asins: List[str]) -> List[Dict[str, Any]]:
+    def get_product_data(self, asins: List[str]) -> Optional[List[Dict[str, Any]]]:
         """
         Get detailed product data for a list of ASINs.
         Includes 90-day statistics for price/rank analysis.
@@ -56,17 +57,18 @@ class KeepaAPI:
             asins: A list of Amazon Standard Identification Numbers.
 
         Returns:
-            A list of product data dictionaries.
+            A list of product data dictionaries, or None on API failure.
+            An empty list means "success, but no results".
         """
         if not self.api:
-            return []
+            return None
 
         try:
             products = self.api.query(asins, domain=self.domain, stats=90)
             return products
-        except Exception as e:
-            logger.error(f"✗ Failed to get product data from Keepa: {e}")
-            return []
+        except Exception:
+            logger.exception("Failed to get product data from Keepa for %d ASINs", len(asins))
+            return None
 
     def discover_products_by_category(
         self,
@@ -76,7 +78,7 @@ class KeepaAPI:
         sales_rank_max: int = None,
         seller_count_max: int = None,
         n_products: int = 50,
-    ) -> List[str]:
+    ) -> Optional[List[str]]:
         """
         Discover product ASINs using Keepa's product_finder.
 
@@ -89,10 +91,11 @@ class KeepaAPI:
             n_products: Max products to return.
 
         Returns:
-            List of ASIN strings.
+            List of ASIN strings, or None on API failure.
+            An empty list means "success, but no results".
         """
         if not self.api:
-            return []
+            return None
 
         try:
             product_parms = {
@@ -117,11 +120,11 @@ class KeepaAPI:
             logger.info(f"product_finder returned {len(asins)} ASINs for category {category_id}")
             return list(asins)
 
-        except Exception as e:
-            logger.error(f"✗ Failed to discover products in category {category_id}: {e}")
-            return []
+        except Exception:
+            logger.exception("Failed to discover products in category %s", category_id)
+            return None
 
-    def get_best_sellers(self, category_id: str, rank_avg_range: int = 30) -> List[str]:
+    def get_best_sellers(self, category_id: str, rank_avg_range: int = 30) -> Optional[List[str]]:
         """
         Get bestseller ASINs for a category.
 
@@ -130,10 +133,11 @@ class KeepaAPI:
             rank_avg_range: 0=current, 30=30-day avg, 90=90-day avg.
 
         Returns:
-            List of ASIN strings.
+            List of ASIN strings, or None on API failure.
+            An empty list means "success, but no results".
         """
         if not self.api:
-            return []
+            return None
 
         try:
             asins = self.api.best_sellers_query(
@@ -144,9 +148,9 @@ class KeepaAPI:
             logger.info(f"best_sellers_query returned {len(asins)} ASINs for category {category_id}")
             return list(asins)
 
-        except Exception as e:
-            logger.error(f"✗ Failed to get best sellers for category {category_id}: {e}")
-            return []
+        except Exception:
+            logger.exception("Failed to get best sellers for category %s", category_id)
+            return None
 
     def search_for_products(self, search_term: str, category: Optional[str] = None) -> List[Dict[str, Any]]:
         """Deprecated: Use discover_products_by_category() instead."""
@@ -154,17 +158,21 @@ class KeepaAPI:
         if category:
             asins = self.discover_products_by_category(category)
             if asins:
-                return self.get_product_data(asins[:20])
+                result = self.get_product_data(asins[:20])
+                return result if result is not None else []
         return []
 
 
 # Singleton instance
+_keepa_api_lock = threading.Lock()
 _keepa_api_instance = None
 
 
 def get_keepa_api() -> KeepaAPI:
-    """Get or create the KeepaAPI instance."""
+    """Get or create the KeepaAPI instance (thread-safe)."""
     global _keepa_api_instance
     if _keepa_api_instance is None:
-        _keepa_api_instance = KeepaAPI()
+        with _keepa_api_lock:
+            if _keepa_api_instance is None:
+                _keepa_api_instance = KeepaAPI()
     return _keepa_api_instance

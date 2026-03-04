@@ -15,25 +15,19 @@ from typing import List, Dict, Any, Optional
 from decimal import Decimal
 import numpy as np
 
-from src.database import SessionLocal, Product, DatabaseOperations
+from src.database import SessionLocal, Product
+from src.services.product_service import get_product
 from src.api_wrappers.keepa_api import get_keepa_api
 from src.api_wrappers.amazon_sp_api import get_sp_api
 from src.config import (
     settings, SALES_RANK_THRESHOLDS, SELLER_COUNT_THRESHOLDS,
     CATEGORY_COGS_ESTIMATES,
 )
-from src.utils.profitability import estimate_amazon_fees
+from src.utils.profitability import estimate_amazon_fees, calculate_profitability
 from src.models.discovery_model import DiscoveryModel
+from src.utils.logger import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(settings.log_file),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -52,10 +46,21 @@ class ProductDiscoveryEngine:
         """Initialize the discovery engine."""
         self.keepa_api = get_keepa_api()
         self.sp_api = get_sp_api()
-        self.db = DatabaseOperations()
         self.model = DiscoveryModel()
         self.session = SessionLocal()
         self._sp_api_fees_available = True  # Turns False after first 403
+
+    def close(self):
+        """Close the database session."""
+        if self.session:
+            self.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     def extract_features(self, product_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -153,10 +158,11 @@ class ProductDiscoveryEngine:
             logger.error(f"✗ Error extracting features: {e}")
             return None
 
-    def calculate_profitability(self, asin: str, price: Decimal, category: str = "default") -> Dict[str, Any]:
+    def estimate_profitability(self, asin: str, price: Decimal, category: str = "default") -> Dict[str, Any]:
         """
         Estimate profitability for a product.
         Tries SP-API fees first, falls back to local estimation.
+        Delegates core profit math to ``utils.profitability.calculate_profitability``.
 
         Args:
             asin: Product ASIN
@@ -191,18 +197,15 @@ class ProductDiscoveryEngine:
             ))
             estimated_cogs = price * cogs_ratio
 
-            # Calculate profit
-            net_profit = price - estimated_cogs - total_fees
-
-            profit_margin = float(net_profit / price) if price > 0 else 0.0
-            roi = float(net_profit / estimated_cogs) if estimated_cogs > 0 else 0.0
+            # Delegate core profit math to shared utility
+            profit_data = calculate_profitability(price, estimated_cogs, total_fees)
 
             return {
                 "estimated_cogs": float(estimated_cogs),
                 "total_fees": float(total_fees),
-                "net_profit": float(net_profit),
-                "profit_margin": profit_margin,
-                "roi": roi,
+                "net_profit": float(profit_data["net_profit"]),
+                "profit_margin": profit_data["profit_margin"],
+                "roi": profit_data["roi"],
             }
 
         except Exception as e:
@@ -276,9 +279,15 @@ class ProductDiscoveryEngine:
 
         for i in range(0, len(asins), batch_size):
             batch = asins[i:i + batch_size]
-            logger.info(f"Querying Keepa for batch {i // batch_size + 1} ({len(batch)} ASINs)...")
+            batch_num = i // batch_size + 1
+            logger.info(f"Querying Keepa for batch {batch_num} ({len(batch)} ASINs)...")
 
             product_data_list = self.keepa_api.get_product_data(batch)
+            if product_data_list is None:
+                logger.warning(
+                    f"Keepa API failure on batch {batch_num} — skipping {len(batch)} ASINs"
+                )
+                continue
             if not product_data_list:
                 continue
 
@@ -292,7 +301,7 @@ class ProductDiscoveryEngine:
                     if current_price <= 0:
                         continue
 
-                    profitability = self.calculate_profitability(
+                    profitability = self.estimate_profitability(
                         features["asin"], current_price, category=features.get("category", "default")
                     )
 
@@ -335,7 +344,7 @@ class ProductDiscoveryEngine:
 
         for opp in opportunities:
             try:
-                existing = self.db.get_product(self.session, opp["asin"])
+                existing = get_product(self.session, opp["asin"])
 
                 if existing:
                     existing.current_price = opp["current_price"]
@@ -410,10 +419,23 @@ class ProductDiscoveryEngine:
                 n_products=per_category_limit,
             )
 
-            # Fallback: If product_finder returns nothing, try best_sellers
+            if asins is None:
+                logger.warning(
+                    f"Keepa product_finder API failure for category {cat_id} — skipping category"
+                )
+                # Don't fall back to best_sellers on API failure; the API may be
+                # down entirely and we'd just get another failure.
+                continue
+
+            # Fallback: If product_finder returned success but no results, try best_sellers
             if not asins:
                 logger.info(f"product_finder empty for {cat_id}, trying best_sellers_query...")
                 asins = self.keepa_api.get_best_sellers(cat_id, rank_avg_range=30)
+                if asins is None:
+                    logger.warning(
+                        f"Keepa best_sellers API failure for category {cat_id} — skipping category"
+                    )
+                    continue
                 asins = asins[:per_category_limit]
 
             all_asins.extend(asins)
@@ -445,43 +467,46 @@ class ProductDiscoveryEngine:
         Returns:
             Number of opportunities found
         """
-        logger.info("Starting Product Discovery Engine")
-        logger.info(f"Timestamp: {datetime.utcnow().isoformat()}")
+        try:
+            logger.info("Starting Product Discovery Engine")
+            logger.info(f"Timestamp: {datetime.utcnow().isoformat()}")
 
-        if not asins:
-            asins = self._discover_asins_from_categories()
+            if not asins:
+                asins = self._discover_asins_from_categories()
 
-        if not asins:
-            logger.warning("No ASINs to analyze. Check DISCOVERY_CATEGORIES in .env.")
-            return 0
+            if not asins:
+                logger.warning("No ASINs to analyze. Check DISCOVERY_CATEGORIES in .env.")
+                return 0
 
-        logger.info(f"Analyzing {len(asins)} discovered ASINs")
+            logger.info(f"Analyzing {len(asins)} discovered ASINs")
 
-        opportunities = self.discover_products(asins)
-        logger.info(f"Found {len(opportunities)} opportunities")
+            opportunities = self.discover_products(asins)
+            logger.info(f"Found {len(opportunities)} opportunities")
 
-        saved = self.save_opportunities(opportunities)
-        logger.info(f"✓ Saved {saved} opportunities to database")
+            saved = self.save_opportunities(opportunities)
+            logger.info(f"✓ Saved {saved} opportunities to database")
 
-        if opportunities:
-            logger.info("\nTop 10 Opportunities:")
-            for i, opp in enumerate(opportunities[:10], 1):
-                logger.info(
-                    f"  {i}. {opp['asin']} | Score: {opp['opportunity_score']:.1f} | "
-                    f"${opp['current_price']:.2f} | Rank: {opp['sales_rank']} | "
-                    f"Est. Sales: {opp['estimated_monthly_sales']}/mo"
-                )
+            if opportunities:
+                logger.info("\nTop 10 Opportunities:")
+                for i, opp in enumerate(opportunities[:10], 1):
+                    logger.info(
+                        f"  {i}. {opp['asin']} | Score: {opp['opportunity_score']:.1f} | "
+                        f"${opp['current_price']:.2f} | Rank: {opp['sales_rank']} | "
+                        f"Est. Sales: {opp['estimated_monthly_sales']}/mo"
+                    )
 
-        return len(opportunities)
+            return len(opportunities)
+        finally:
+            self.close()
 
 
 def main():
     """Run Phase 2: Product Discovery."""
     try:
-        engine = ProductDiscoveryEngine()
-        count = engine.run()
-        logger.info(f"✓ Phase 2 complete: {count} opportunities found")
-        return True
+        with ProductDiscoveryEngine() as engine:
+            count = engine.run()
+            logger.info(f"✓ Phase 2 complete: {count} opportunities found")
+            return True
     except Exception as e:
         logger.error(f"✗ Phase 2 failed: {e}")
         return False

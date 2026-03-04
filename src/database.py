@@ -17,14 +17,12 @@ from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 from sqlalchemy.pool import StaticPool
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
+from src.config import settings
 
 # Database Configuration
-DATABASE_TYPE = os.getenv("DATABASE_TYPE", "sqlite")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./replens_automation.db")
+DATABASE_TYPE = settings.database_type
+DATABASE_URL = settings.database_url
 
 # Create engine based on database type
 if DATABASE_TYPE == "sqlite":
@@ -380,97 +378,65 @@ def get_db() -> Session:
 # DATABASE OPERATIONS
 # ============================================================================
 class DatabaseOperations:
-    """High-level database operations for the Replens system."""
-    
+    """Thin facade that delegates to domain service modules.
+
+    Kept for backward compatibility — callers can also import functions
+    directly from ``src.services``.
+    """
+
     @staticmethod
     def get_session() -> Session:
         """Get a new database session."""
         return SessionLocal()
-    
+
     @staticmethod
     def add_product(session: Session, asin: str, title: str, category: str, **kwargs) -> Product:
-        """Add a new product to the database."""
-        product = Product(asin=asin, title=title, category=category, **kwargs)
-        session.add(product)
-        session.commit()
-        return product
-    
+        from src.services.product_service import add_product
+        return add_product(session, asin, title, category, **kwargs)
+
     @staticmethod
     def get_product(session: Session, asin: str) -> Optional[Product]:
-        """Get a product by ASIN."""
-        return session.query(Product).filter(Product.asin == asin).first()
-    
+        from src.services.product_service import get_product
+        return get_product(session, asin)
+
     @staticmethod
     def get_underserved_products(session: Session, limit: int = 50) -> List[Product]:
-        """Get top underserved products by opportunity score."""
-        return session.query(Product)\
-            .filter(Product.is_underserved == True, Product.status == "active")\
-            .order_by(Product.opportunity_score.desc())\
-            .limit(limit)\
-            .all()
-    
+        from src.services.product_service import get_underserved_products
+        return get_underserved_products(session, limit)
+
     @staticmethod
     def get_low_stock_products(session: Session) -> List[Product]:
-        """Get products that need reordering."""
-        return session.query(Product)\
-            .join(Inventory)\
-            .filter(Inventory.needs_reorder == True)\
-            .all()
-    
+        from src.services.product_service import get_low_stock_products
+        return get_low_stock_products(session)
+
     @staticmethod
     def add_supplier(session: Session, name: str, **kwargs) -> Supplier:
-        """Add a new supplier to the database."""
-        supplier = Supplier(name=name, **kwargs)
-        session.add(supplier)
-        session.commit()
-        return supplier
-    
+        from src.services.supplier_service import add_supplier
+        return add_supplier(session, name, **kwargs)
+
     @staticmethod
     def get_supplier(session: Session, supplier_id: int) -> Optional[Supplier]:
-        """Get a supplier by ID."""
-        return session.query(Supplier).filter(Supplier.supplier_id == supplier_id).first()
-    
+        from src.services.supplier_service import get_supplier
+        return get_supplier(session, supplier_id)
+
     @staticmethod
     def get_product_suppliers(session: Session, asin: str) -> List[ProductSupplier]:
-        """Get all suppliers for a product, sorted by profitability."""
-        return session.query(ProductSupplier)\
-            .filter(ProductSupplier.asin == asin)\
-            .order_by(ProductSupplier.profit_margin.desc())\
-            .all()
-    
+        from src.services.supplier_service import get_product_suppliers
+        return get_product_suppliers(session, asin)
+
     @staticmethod
-    def create_purchase_order(session: Session, po_id: str, asin: str, supplier_id: int, 
-                             quantity: int, unit_cost: Decimal) -> PurchaseOrder:
-        """Create a new purchase order."""
-        po = PurchaseOrder(
-            po_id=po_id,
-            asin=asin,
-            supplier_id=supplier_id,
-            quantity=quantity,
-            unit_cost=unit_cost,
-            total_cost=Decimal(quantity) * unit_cost
-        )
-        session.add(po)
-        session.commit()
-        return po
-    
+    def create_purchase_order(session: Session, po_id: str, asin: str, supplier_id: int,
+                              quantity: int, unit_cost: Decimal) -> PurchaseOrder:
+        from src.services.order_service import create_purchase_order
+        return create_purchase_order(session, po_id, asin, supplier_id, quantity, unit_cost)
+
     @staticmethod
     def record_performance(session: Session, asin: str, units_sold: int, revenue: Decimal,
-                          cost_of_goods: Decimal, amazon_fees: Decimal, buy_box_owned: bool = False) -> Performance:
-        """Record daily performance metrics."""
-        net_profit = revenue - cost_of_goods - amazon_fees
-        perf = Performance(
-            asin=asin,
-            units_sold=units_sold,
-            revenue=revenue,
-            cost_of_goods=cost_of_goods,
-            amazon_fees=amazon_fees,
-            net_profit=net_profit,
-            buy_box_owned=buy_box_owned
-        )
-        session.add(perf)
-        session.commit()
-        return perf
+                           cost_of_goods: Decimal, amazon_fees: Decimal,
+                           buy_box_owned: bool = False) -> Performance:
+        from src.services.performance_service import record_performance
+        return record_performance(session, asin, units_sold, revenue, cost_of_goods,
+                                  amazon_fees, buy_box_owned)
 
 
 if __name__ == "__main__":

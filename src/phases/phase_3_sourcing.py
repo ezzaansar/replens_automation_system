@@ -15,7 +15,11 @@ from decimal import Decimal
 
 from src.database import (
     SessionLocal, Product, Supplier, ProductSupplier, Inventory,
-    PurchaseOrder, DatabaseOperations,
+    PurchaseOrder,
+)
+from src.services import (
+    get_underserved_products, get_product_suppliers,
+    get_supplier, get_low_stock_products, create_purchase_order,
 )
 from src.api_wrappers.amazon_sp_api import get_sp_api
 from src.config import settings, CATEGORY_COGS_ESTIMATES
@@ -26,16 +30,9 @@ from src.utils.validators import (
     validate_upc, validate_price, validate_quantity,
     sanitize_string, generate_po_id,
 )
+from src.utils.logger import setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(settings.log_file),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -52,7 +49,6 @@ class SourcingEngine:
     def __init__(self):
         """Initialize the sourcing engine."""
         self.sp_api = get_sp_api()
-        self.db = DatabaseOperations()
         self.session = SessionLocal()
         self.openai_client = None
 
@@ -65,6 +61,18 @@ class SourcingEngine:
                 logger.warning(f"OpenAI initialization failed, using rule-based mode: {e}")
         else:
             logger.info("No OpenAI API key configured. Using rule-based supplier estimation.")
+
+    def close(self):
+        """Close the database session."""
+        if self.session:
+            self.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     def enrich_product(self, product: Product) -> Optional[str]:
         """
@@ -147,7 +155,14 @@ class SourcingEngine:
                 content = content.split("```")[1]
                 if content.startswith("json"):
                     content = content[4:]
-            suggestions = json.loads(content)
+            try:
+                suggestions = json.loads(content)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    f"  Malformed JSON from OpenAI for {product.asin}: {exc}. "
+                    f"Raw content: {content[:200]}"
+                )
+                return []
 
             results = []
             for s in suggestions[:3]:
@@ -347,16 +362,25 @@ class SourcingEngine:
         Returns:
             The preferred ProductSupplier, or None if none qualifies
         """
-        pairings = self.db.get_product_suppliers(self.session, product.asin)
+        pairings = get_product_suppliers(self.session, product.asin)
         if not pairings:
             return None
 
         for ps in pairings:
             ps.is_preferred = False
 
+        # Prefetch all needed suppliers in one query to avoid N+1
+        supplier_ids = [ps.supplier_id for ps in pairings]
+        suppliers = (
+            self.session.query(Supplier)
+            .filter(Supplier.supplier_id.in_(supplier_ids))
+            .all()
+        )
+        supplier_map = {s.supplier_id: s for s in suppliers}
+
         qualifying = []
         for ps in pairings:
-            supplier = self.db.get_supplier(self.session, ps.supplier_id)
+            supplier = supplier_map.get(ps.supplier_id)
             if supplier and meets_profitability_thresholds(
                 profit_margin=ps.profit_margin or 0,
                 roi=ps.roi or 0,
@@ -439,19 +463,19 @@ class SourcingEngine:
 
         new_pos = []
 
-        low_stock_products = self.db.get_low_stock_products(self.session)
+        low_stock_products = get_low_stock_products(self.session)
         logger.info(f"Found {len(low_stock_products)} products needing reorder")
 
         for product in low_stock_products:
             try:
-                pairings = self.db.get_product_suppliers(self.session, product.asin)
+                pairings = get_product_suppliers(self.session, product.asin)
                 preferred = next((ps for ps in pairings if ps.is_preferred), None)
 
                 if not preferred:
                     logger.debug(f"  No preferred supplier for {product.asin}, skipping PO")
                     continue
 
-                supplier = self.db.get_supplier(self.session, preferred.supplier_id)
+                supplier = get_supplier(self.session, preferred.supplier_id)
                 if not supplier or supplier.status != "active":
                     continue
 
@@ -484,7 +508,7 @@ class SourcingEngine:
                     continue
 
                 po_id = generate_po_id(product.asin, supplier.supplier_id)
-                po = self.db.create_purchase_order(
+                po = create_purchase_order(
                     session=self.session,
                     po_id=po_id,
                     asin=product.asin,
@@ -532,7 +556,7 @@ class SourcingEngine:
         self.enrich_product(product)
 
         # Step 2: Check existing suppliers
-        existing_suppliers = self.db.get_product_suppliers(self.session, product.asin)
+        existing_suppliers = get_product_suppliers(self.session, product.asin)
         if existing_suppliers:
             logger.info(f"  {product.asin} already has {len(existing_suppliers)} supplier(s), re-analyzing")
 
@@ -598,64 +622,67 @@ class SourcingEngine:
         Returns:
             Dict with counts: products_processed, suppliers_matched, pos_created
         """
-        logger.info("=" * 70)
-        logger.info("Starting Phase 3: Supplier Matching & Procurement")
-        logger.info(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
-        logger.info(f"Mode: {'OpenAI-assisted' if self.openai_client else 'Rule-based'}")
-        logger.info("=" * 70)
+        try:
+            logger.info("=" * 70)
+            logger.info("Starting Phase 3: Supplier Matching & Procurement")
+            logger.info(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+            logger.info(f"Mode: {'OpenAI-assisted' if self.openai_client else 'Rule-based'}")
+            logger.info("=" * 70)
 
-        stats = {
-            "products_processed": 0,
-            "suppliers_matched": 0,
-            "pos_created": 0,
-        }
+            stats = {
+                "products_processed": 0,
+                "suppliers_matched": 0,
+                "pos_created": 0,
+            }
 
-        # Step 1: Get products that need supplier matching
-        products = self.db.get_underserved_products(self.session, limit=limit)
-        logger.info(f"Found {len(products)} underserved products to process")
+            # Step 1: Get products that need supplier matching
+            products = get_underserved_products(self.session, limit=limit)
+            logger.info(f"Found {len(products)} underserved products to process")
 
-        if not products:
-            logger.info("No products to process. Run Phase 2 first.")
+            if not products:
+                logger.info("No products to process. Run Phase 2 first.")
+                return stats
+
+            # Step 2: Process each product
+            for i, product in enumerate(products, 1):
+                logger.info(f"\n[{i}/{len(products)}] -----------------------------------------")
+                try:
+                    matched = self.process_product(product)
+                    stats["products_processed"] += 1
+                    if matched:
+                        stats["suppliers_matched"] += 1
+                except Exception as e:
+                    logger.error(f"Error processing product {product.asin}: {e}")
+                    self.session.rollback()
+                    continue
+
+            # Step 3: Generate purchase orders
+            logger.info("\n" + "=" * 70)
+            logger.info("Generating Purchase Orders")
+            logger.info("=" * 70)
+            new_pos = self.generate_purchase_orders()
+            stats["pos_created"] = len(new_pos)
+
+            # Summary
+            logger.info("\n" + "=" * 70)
+            logger.info("Phase 3 Summary")
+            logger.info("=" * 70)
+            logger.info(f"  Products processed: {stats['products_processed']}")
+            logger.info(f"  Suppliers matched:  {stats['suppliers_matched']}")
+            logger.info(f"  POs created:        {stats['pos_created']}")
+
             return stats
-
-        # Step 2: Process each product
-        for i, product in enumerate(products, 1):
-            logger.info(f"\n[{i}/{len(products)}] -----------------------------------------")
-            try:
-                matched = self.process_product(product)
-                stats["products_processed"] += 1
-                if matched:
-                    stats["suppliers_matched"] += 1
-            except Exception as e:
-                logger.error(f"Error processing product {product.asin}: {e}")
-                self.session.rollback()
-                continue
-
-        # Step 3: Generate purchase orders
-        logger.info("\n" + "=" * 70)
-        logger.info("Generating Purchase Orders")
-        logger.info("=" * 70)
-        new_pos = self.generate_purchase_orders()
-        stats["pos_created"] = len(new_pos)
-
-        # Summary
-        logger.info("\n" + "=" * 70)
-        logger.info("Phase 3 Summary")
-        logger.info("=" * 70)
-        logger.info(f"  Products processed: {stats['products_processed']}")
-        logger.info(f"  Suppliers matched:  {stats['suppliers_matched']}")
-        logger.info(f"  POs created:        {stats['pos_created']}")
-
-        return stats
+        finally:
+            self.close()
 
 
 def main():
     """Run Phase 3: Supplier Matching & Procurement."""
     try:
-        engine = SourcingEngine()
-        stats = engine.run()
-        logger.info(f"Phase 3 complete: {stats}")
-        return True
+        with SourcingEngine() as engine:
+            stats = engine.run()
+            logger.info(f"Phase 3 complete: {stats}")
+            return True
     except Exception as e:
         logger.error(f"Phase 3 failed: {e}")
         return False

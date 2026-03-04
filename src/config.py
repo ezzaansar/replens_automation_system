@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     amazon_refresh_token: str
     amazon_region: str = "NA"  # NA, EU, FE
     amazon_seller_id: str
+    amazon_marketplace_id: str = "ATVPDKIKX0DER"  # US marketplace
     
     # ========================================================================
     # KEEPA API CONFIGURATION

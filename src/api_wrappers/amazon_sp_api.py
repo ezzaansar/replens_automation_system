@@ -10,7 +10,9 @@ Provides clean, high-level interface to Amazon SP-API for:
 """
 
 import logging
+import threading
 import time
+import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -37,7 +39,8 @@ class AmazonSPAPI:
         self.refresh_token = settings.amazon_refresh_token
         self.region = settings.amazon_region
         self.seller_id = settings.amazon_seller_id
-        
+        self.marketplace_id = settings.amazon_marketplace_id
+
         self.base_url = AMAZON_SP_API_ENDPOINTS[self.region]
         self.access_token = None
         self.token_expiry = None
@@ -73,8 +76,8 @@ class AmazonSPAPI:
             self.token_expiry = datetime.utcnow() + timedelta(seconds=expires_in - 60)
             
             logger.info("✓ SP-API access token refreshed")
-        except Exception as e:
-            logger.error(f"✗ Failed to refresh SP-API token: {e}")
+        except (requests.RequestException, KeyError, ValueError) as e:
+            logger.exception(f"✗ Failed to refresh SP-API token: {e}")
             raise
     
     def _ensure_valid_token(self):
@@ -174,7 +177,7 @@ class AmazonSPAPI:
         """
         endpoint = f"/catalog/2022-04-01/items/{asin}"
         params = {
-            "marketplaceIds": ["ATVPDKIKX0DER"],  # US marketplace
+            "marketplaceIds": [self.marketplace_id],
             "includedData": ["attributes", "identifiers", "images", "productTypes", "summaries"],
         }
         
@@ -192,13 +195,13 @@ class AmazonSPAPI:
         """
         endpoint = "/products/pricing/v0/competitivePrice"
         params = {
-            "MarketplaceId": "ATVPDKIKX0DER",
+            "MarketplaceId": self.marketplace_id,
             "Asins": asin,
             "ItemType": "Asin",
         }
-        
+
         return self._make_request("GET", endpoint, params=params)
-    
+
     def get_my_price(self, asin: str) -> Dict[str, Any]:
         """
         Get your current price for a product.
@@ -211,13 +214,13 @@ class AmazonSPAPI:
         """
         endpoint = "/products/pricing/v0/myPrice"
         params = {
-            "MarketplaceId": "ATVPDKIKX0DER",
+            "MarketplaceId": self.marketplace_id,
             "Asins": asin,
             "ItemType": "Asin",
         }
-        
+
         return self._make_request("GET", endpoint, params=params)
-    
+
     # ========================================================================
     # INVENTORY MANAGEMENT
     # ========================================================================
@@ -231,10 +234,10 @@ class AmazonSPAPI:
         """
         endpoint = "/fba/inventory/v1/summaries"
         params = {
-            "marketplaceIds": ["ATVPDKIKX0DER"],
+            "marketplaceIds": [self.marketplace_id],
             "granularityType": "Marketplace",
         }
-        
+
         response = self._make_request("GET", endpoint, params=params)
         return response.get("inventorySummaries", [])
     
@@ -250,14 +253,15 @@ class AmazonSPAPI:
         """
         endpoint = f"/fba/inventory/v1/summaries/{sku}"
         params = {
-            "marketplaceIds": ["ATVPDKIKX0DER"],
+            "marketplaceIds": [self.marketplace_id],
             "granularityType": "Marketplace",
         }
-        
+
         try:
             response = self._make_request("GET", endpoint, params=params)
             return response.get("inventorySummaries", [None])[0]
-        except:
+        except (requests.RequestException, KeyError, IndexError) as e:
+            logger.exception(f"Failed to get inventory summary for SKU {sku}: {e}")
             return None
     
     # ========================================================================
@@ -280,29 +284,43 @@ class AmazonSPAPI:
         # Create feed document
         feed_data = {
             "feedType": "POST_PRODUCT_PRICING_DATA",
-            "marketplaceIds": ["ATVPDKIKX0DER"],
+            "marketplaceIds": [self.marketplace_id],
             "inputFeedDocumentId": None,
             "feedOptions": {},
             "documentSpecVersion": "2.0",
         }
         
-        # Create pricing feed
-        pricing_data = f"""<?xml version="1.0" encoding="UTF-8"?>
-<AmazonEnvelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="amzn-envelope.xsd">
-    <Header>
-        <DocumentVersion>1.01</DocumentVersion>
-        <MerchantIdentifier>{self.seller_id}</MerchantIdentifier>
-    </Header>
-    <MessageType>Price</MessageType>
-    <Message>
-        <MessageID>1</MessageID>
-        <OperationType>Update</OperationType>
-        <Price>
-            <SKU>{sku}</SKU>
-            <StandardPrice currency="USD">{price}</StandardPrice>
-        </Price>
-    </Message>
-</AmazonEnvelope>"""
+        # Create pricing feed using ElementTree to safely escape values
+        envelope = ET.Element("AmazonEnvelope")
+        envelope.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
+        envelope.set("xsi:noNamespaceSchemaLocation", "amzn-envelope.xsd")
+
+        header = ET.SubElement(envelope, "Header")
+        doc_version = ET.SubElement(header, "DocumentVersion")
+        doc_version.text = "1.01"
+        merchant_id = ET.SubElement(header, "MerchantIdentifier")
+        merchant_id.text = str(self.seller_id)
+
+        msg_type = ET.SubElement(envelope, "MessageType")
+        msg_type.text = "Price"
+
+        message = ET.SubElement(envelope, "Message")
+        msg_id = ET.SubElement(message, "MessageID")
+        msg_id.text = "1"
+        op_type = ET.SubElement(message, "OperationType")
+        op_type.text = "Update"
+
+        price_elem = ET.SubElement(message, "Price")
+        sku_elem = ET.SubElement(price_elem, "SKU")
+        sku_elem.text = str(sku)
+        std_price = ET.SubElement(price_elem, "StandardPrice")
+        std_price.set("currency", "USD")
+        std_price.text = str(price)
+
+        ET.indent(envelope, space="    ")
+        pricing_data = '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+            envelope, encoding="unicode"
+        )
         
         try:
             # This is a simplified example. Full implementation would involve:
@@ -311,8 +329,8 @@ class AmazonSPAPI:
             # 3. Submitting the feed
             logger.info(f"✓ Price updated for {sku}: ${price}")
             return True
-        except Exception as e:
-            logger.error(f"✗ Failed to update price for {sku}: {e}")
+        except (requests.RequestException, ET.ParseError, ValueError) as e:
+            logger.exception(f"✗ Failed to update price for {sku}: {e}")
             return False
     
     # ========================================================================
@@ -339,7 +357,7 @@ class AmazonSPAPI:
         
         endpoint = "/orders/v0/orders"
         params = {
-            "MarketplaceId": "ATVPDKIKX0DER",
+            "MarketplaceId": self.marketplace_id,
             "CreatedAfter": created_after.isoformat(),
             "OrderStatuses": ",".join(order_statuses),
         }
@@ -358,7 +376,7 @@ class AmazonSPAPI:
             List of order items
         """
         endpoint = f"/orders/v0/orders/{order_id}/orderitems"
-        params = {"MarketplaceId": "ATVPDKIKX0DER"}
+        params = {"MarketplaceId": self.marketplace_id}
         
         response = self._make_request("GET", endpoint, params=params)
         return response.get("OrderItems", [])
@@ -401,7 +419,7 @@ class AmazonSPAPI:
         """
         endpoint = "/products/fees/v0/estimateFeesForASIN"
         params = {
-            "MarketplaceId": "ATVPDKIKX0DER",
+            "MarketplaceId": self.marketplace_id,
             "Asins": asin,
             "PriceToEstimateFees": {
                 "ListingPrice": {
@@ -422,12 +440,19 @@ class AmazonSPAPI:
                 "fba_fee": Decimal(fees.get("FBAFees", {}).get("Amount", 0)),
                 "variable_closing_fee": Decimal(fees.get("VariableClosingFee", {}).get("Amount", 0)),
             }
-        except Exception as e:
-            logger.error(f"✗ Failed to estimate fees for {asin}: {e}")
+        except requests.exceptions.HTTPError as e:
+            logger.exception(f"✗ Failed to estimate fees for {asin}: {e}")
             # Re-raise 403 errors so callers can detect permission issues
             # and switch to local fee estimation
-            if "403" in str(e):
+            if e.response is not None and e.response.status_code == 403:
                 raise
+            return {
+                "referral_fee": Decimal(0),
+                "fba_fee": Decimal(0),
+                "variable_closing_fee": Decimal(0),
+            }
+        except (requests.RequestException, KeyError, IndexError, ValueError) as e:
+            logger.exception(f"✗ Failed to estimate fees for {asin}: {e}")
             return {
                 "referral_fee": Decimal(0),
                 "fba_fee": Decimal(0),
@@ -436,12 +461,15 @@ class AmazonSPAPI:
 
 
 # Singleton instance
+_sp_api_lock = threading.Lock()
 _sp_api_instance = None
 
 
 def get_sp_api() -> AmazonSPAPI:
-    """Get or create the SP-API instance."""
+    """Get or create the SP-API instance (thread-safe)."""
     global _sp_api_instance
     if _sp_api_instance is None:
-        _sp_api_instance = AmazonSPAPI()
+        with _sp_api_lock:
+            if _sp_api_instance is None:
+                _sp_api_instance = AmazonSPAPI()
     return _sp_api_instance

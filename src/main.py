@@ -7,9 +7,10 @@ This script orchestrates the execution of all phases of the system.
 import logging
 import sys
 
+from src.utils.logger import setup_logging
 from src.phases import phase_1_setup, phase_2_discovery, phase_3_sourcing, phase_4_repricing, phase_5_forecasting
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 def main():

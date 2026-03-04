@@ -10,31 +10,20 @@ Initializes the system by:
 
 import logging
 import sys
-from pathlib import Path
 from datetime import datetime
 
-from src.database import init_db, DatabaseOperations, SessionLocal, Product
+from src.database import init_db, SessionLocal, Product
 from src.config import settings, validate_settings
 from src.api_wrappers.amazon_sp_api import get_sp_api
 from src.api_wrappers.keepa_api import get_keepa_api
+from src.utils.logger import setup_logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(settings.log_file),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
-def setup_logging():
-    """Configure logging for the system."""
-    log_dir = Path(settings.log_file).parent
-    log_dir.mkdir(parents=True, exist_ok=True)
+def setup_logging_step():
+    """Log that logging has been configured (actual setup is in src.utils.logger)."""
     logger.info("✓ Logging configured")
 
 
@@ -143,7 +132,7 @@ def main():
     
     # Step 1: Setup logging
     logger.info("\n[1/6] Setting up logging...")
-    setup_logging()
+    setup_logging_step()
     
     # Step 2: Validate configuration
     logger.info("\n[2/6] Validating configuration...")
