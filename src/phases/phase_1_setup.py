@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from src.database import init_db, DatabaseOperations, SessionLocal
+from src.database import init_db, DatabaseOperations, SessionLocal, Product
 from src.config import settings, validate_settings
 from src.api_wrappers.amazon_sp_api import get_sp_api
 from src.api_wrappers.keepa_api import get_keepa_api
@@ -93,7 +93,7 @@ def create_sample_data():
         session = SessionLocal()
         
         # Check if we already have sample data
-        products = session.query(DatabaseOperations).count()
+        products = session.query(Product).count()
         if products > 0:
             logger.info("Sample data already exists, skipping creation")
             return True
@@ -176,11 +176,15 @@ def main():
     
     if sp_api_ok and keepa_api_ok:
         logger.info("✓ All systems operational")
-        print_system_status()
-        return True
     else:
-        logger.warning("⚠ Some API connections failed. Check configuration and try again.")
-        return False
+        logger.warning("⚠ Some API connections failed. System will continue with available APIs.")
+        if not sp_api_ok:
+            logger.warning("  - Amazon SP-API: Check app permissions in Seller Central")
+        if not keepa_api_ok:
+            logger.warning("  - Keepa API: Check your API key")
+
+    print_system_status()
+    return True
 
 
 if __name__ == "__main__":

@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     safety_stock_days: int = 7
     reorder_point_multiplier: float = 1.5
     
+    # Discovery Configuration
+    discovery_categories: str = "2619525011,3760911,1055398"
+    discovery_price_min: int = 1000
+    discovery_price_max: int = 10000
+    discovery_sales_rank_max: int = 100000
+    discovery_seller_count_max: int = 15
+    discovery_max_products: int = 200
+    discovery_cogs_ratio: float = 0.30
+
     # Forecasting Configuration
     forecast_days_ahead: int = 30
     seasonality_adjustment: bool = True
@@ -164,6 +173,21 @@ AMAZON_FBA_FEES = {
         "weight_limit": float('inf'),
         "fee": 0.50  # Per pound
     }
+}
+
+# Category-specific COGS estimates
+CATEGORY_COGS_ESTIMATES = {
+    "default": 0.30,
+    "grocery": 0.50,
+    "health_personal_care": 0.35,
+    "beauty": 0.25,
+    "home": 0.30,
+    "toys": 0.30,
+    "electronics": 0.40,
+    "sports": 0.30,
+    "office": 0.30,
+    "baby": 0.35,
+    "pet_supplies": 0.35,
 }
 
 # Sales Rank Thresholds for Underserved Detection

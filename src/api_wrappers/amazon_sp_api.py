@@ -424,6 +424,10 @@ class AmazonSPAPI:
             }
         except Exception as e:
             logger.error(f"✗ Failed to estimate fees for {asin}: {e}")
+            # Re-raise 403 errors so callers can detect permission issues
+            # and switch to local fee estimation
+            if "403" in str(e):
+                raise
             return {
                 "referral_fee": Decimal(0),
                 "fba_fee": Decimal(0),
