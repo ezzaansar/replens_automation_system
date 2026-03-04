@@ -23,6 +23,7 @@ uv run python src/phases/phase_1_setup.py
 uv run python src/phases/phase_2_discovery.py
 uv run python src/phases/phase_3_sourcing.py
 uv run python src/phases/phase_4_repricing.py
+uv run python src/phases/phase_5_forecasting.py
 
 # Dashboard
 uv run streamlit run src/dashboard/app.py
@@ -39,7 +40,7 @@ uv run pytest --cov=src          # With coverage
 uv run pytest -v                 # Verbose
 ```
 
-Tests use in-memory SQLite via shared fixtures in `tests/conftest.py`. Current suite: 193 tests across 5 files (test_database, test_discovery_model, test_profitability, test_validators, test_repricing).
+Tests use in-memory SQLite via shared fixtures in `tests/conftest.py`. Current suite: 207 tests across 6 files (test_database, test_discovery_model, test_profitability, test_validators, test_repricing, test_forecasting).
 
 ## Linting
 
@@ -77,10 +78,10 @@ sqlite3 replens_automation.db "SELECT asin, opportunity_score, is_underserved FR
 ### Not Yet Implemented
 
 - [x] Phase 4: Dynamic repricing engine
-- [ ] Phase 5: Inventory forecasting with Prophet/XGBoost
+- [x] Phase 5: Inventory forecasting (tiered: Keepa/ExpSmoothing/Prophet + auto-PO)
 - [ ] Dashboard: Streamlit app with charts and KPIs
 - [ ] Scheduler: APScheduler-based job scheduling (`scheduler.py`)
-- [x] Test suite (193 tests)
+- [x] Test suite (207 tests)
 - [ ] Docker deployment files
 - [ ] Alembic database migrations
 - [ ] Notification system (email/Slack alerts)

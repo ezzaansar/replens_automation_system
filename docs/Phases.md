@@ -159,18 +159,61 @@ uv run python src/phases/phase_4_repricing.py
 ## Phase 5: Inventory Forecasting
 
 **File:** `src/phases/phase_5_forecasting.py`
-**Status:** Stub (not implemented)
+**Status:** Implemented
 
-### Planned Functionality
+Predicts future demand per product using a tiered approach, updates inventory forecast fields, and auto-generates purchase orders when reorder points are breached.
 
-- Pull historical sales data from SP-API
-- Time-series forecasting (Prophet, XGBoost, ARIMA — all in dependencies)
-- Reorder point = lead time demand + safety stock
-- Auto-trigger POs when stock < reorder point
-- Seasonality adjustment
+### Tiered Forecasting
 
-### Existing Support
+| Data Points | Tier | Method | Rationale |
+|---|---|---|---|
+| < 14 | 1 | Keepa `estimated_monthly_sales / 30` | Always available, no history needed |
+| 14–59 | 2 | Exponential smoothing (statsmodels `SimpleExpSmoothing`, α=0.3) | Works with limited data, captures recent trends |
+| 60+ | 3 | Prophet (weekly seasonality, conservative changepoints) | Full seasonality detection with enough data |
 
-- `Inventory` model has `forecasted_stock_30d`, `forecasted_stock_60d`, `reorder_point`, `safety_stock`
-- Phase 3 already initializes inventory records with basic reorder parameters
-- Dependencies: `prophet`, `xgboost`, `statsmodels`, `scikit-learn` all installed
+Each tier falls back to the one below on failure. Daily demand clamped to min 0.01 to avoid division by zero.
+
+### Workflow
+
+For each eligible product (active, has inventory record, has preferred supplier):
+
+1. **Gather History** — Queries Performance table for `(date, units_sold)` where `units_sold > 0`. Optionally supplements with SP-API order data (gracefully handles 403).
+2. **Select Tier** — Based on number of historical data points.
+3. **Forecast Daily Demand** — Runs the selected tier's algorithm. Falls back to lower tiers on failure.
+4. **Update Inventory** — Computes and writes:
+   - `forecasted_stock_30d` = current_stock - ceil(daily_demand × 30)
+   - `forecasted_stock_60d` = current_stock - ceil(daily_demand × 60)
+   - `days_of_supply` = current_stock / daily_demand
+   - `safety_stock` = ceil(daily_demand × safety_stock_days)
+   - `reorder_point` = ceil(daily_demand × safety_stock_days × reorder_point_multiplier)
+   - `needs_reorder` = (current_stock <= reorder_point)
+5. **Auto-PO** — When `needs_reorder=True` and no active PO exists (`status in [pending, confirmed, shipped]`): generates a PO via `create_purchase_order()`. Quantity = `max(supplier.min_order_qty, ceil(daily_demand × forecast_days_ahead))`. Skipped in `dry_run` mode.
+
+### Error Handling
+
+- SP-API 403 on orders → disables order fetching for the rest of the run
+- Prophet import failure → falls back to Tier 2 (exponential smoothing)
+- Each product wrapped in try/except with `session.rollback()`
+
+### Key Classes / Functions
+
+- `ForecastingEngine` — main engine (context manager)
+  - `forecast_daily_demand(product, history)` → `(float, int)` (demand, tier)
+  - `update_inventory_forecast(product, daily_demand)` → dict
+  - `forecast_product(product)` → result dict
+  - `run(limit=100)` → summary stats dict
+- `get_forecastable_products()` — service query (active + inventory + preferred supplier, any stock level)
+- `get_sales_history()` — Performance table query for sales data
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `FORECAST_DAYS_AHEAD` | `30` | Days of demand to order when generating auto-PO |
+| `SAFETY_STOCK_DAYS` | `7` | Buffer days for safety stock calculation |
+| `REORDER_POINT_MULTIPLIER` | `1.5` | Multiplier on safety stock for reorder trigger |
+| `DRY_RUN` | `false` | Log PO decisions without creating them |
+
+```bash
+uv run python src/phases/phase_5_forecasting.py
+```

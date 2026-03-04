@@ -56,3 +56,24 @@ def get_repriceable_products(session: Session, limit: int = 100) -> List[Product
         .order_by(Product.opportunity_score.desc())\
         .limit(limit)\
         .all()
+
+
+def get_forecastable_products(session: Session, limit: int = 100) -> List[Product]:
+    """Get active products with an inventory record and a preferred supplier.
+
+    Like ``get_repriceable_products`` but without the ``current_stock > 0``
+    filter — we want to forecast even for zero-stock products so reorder
+    alerts can fire.
+
+    Ordered by opportunity_score descending.
+    """
+    return session.query(Product)\
+        .join(Inventory)\
+        .join(Product.suppliers)\
+        .filter(
+            Product.status == "active",
+            ProductSupplier.is_preferred == True,
+        )\
+        .order_by(Product.opportunity_score.desc())\
+        .limit(limit)\
+        .all()

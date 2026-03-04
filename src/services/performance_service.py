@@ -1,7 +1,8 @@
 """Performance metrics domain service functions."""
 
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -51,3 +52,26 @@ def record_repricing_action(
     session.add(perf)
     session.commit()
     return perf
+
+
+def get_sales_history(
+    session: Session, asin: str, lookback_days: int = 90
+) -> List[Tuple[datetime, int]]:
+    """Return daily (date, units_sold) tuples for *asin*.
+
+    Only rows where ``units_sold > 0`` are included (excludes repricing-only
+    records).  Results are ordered by date ascending and limited to the last
+    *lookback_days* days.  Uses the composite ``idx_asin_date`` index.
+    """
+    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+    rows = (
+        session.query(Performance.date, Performance.units_sold)
+        .filter(
+            Performance.asin == asin,
+            Performance.units_sold > 0,
+            Performance.date >= cutoff,
+        )
+        .order_by(Performance.date.asc())
+        .all()
+    )
+    return [(row.date, row.units_sold) for row in rows]

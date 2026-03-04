@@ -17,7 +17,7 @@ The system is a 5-phase pipeline that runs sequentially via `src/main.py`. Each 
 │                    ▼                                      │
 │               Phase 4          Phase 5                   │
 │               Repricing  ───>  Forecasting               │
-│               (Buy Box)        (stub)                    │
+│               (Buy Box)        (tiered demand + auto-PO) │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -108,5 +108,5 @@ Phase 2: Discovery              Phase 3: Sourcing
 | Service | Required | Used By | Purpose |
 |---|---|---|---|
 | Keepa API | Yes | Phase 2 | Product discovery, historical data |
-| Amazon SP-API | Yes | Phase 1, 2, 3, 4 | Catalog, fees, inventory, orders, pricing, repricing |
+| Amazon SP-API | Yes | Phase 1, 2, 3, 4, 5 | Catalog, fees, inventory, orders, pricing, repricing, forecasting |
 | OpenAI API | No | Phase 3 | Supplier suggestions (falls back to rule-based) |

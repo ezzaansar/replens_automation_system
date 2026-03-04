@@ -28,7 +28,7 @@ src/
     phase_2_discovery.py  # [IMPLEMENTED] Keepa discovery, feature extraction, ML scoring
     phase_3_sourcing.py   # [IMPLEMENTED] Supplier matching, profitability, PO generation
     phase_4_repricing.py  # [IMPLEMENTED] Dynamic repricing (Buy Box optimization)
-    phase_5_forecasting.py # [STUB] Inventory forecasting
+    phase_5_forecasting.py # [IMPLEMENTED] Inventory forecasting (tiered demand prediction + auto-PO)
   models/
     base.py            # SQLAlchemy declarative base
     product.py         # Product ORM model
@@ -41,7 +41,7 @@ src/
     product_service.py   # Product CRUD operations
     supplier_service.py  # Supplier CRUD operations
     order_service.py     # Purchase order operations
-    performance_service.py # Performance recording + repricing actions
+    performance_service.py # Performance recording, repricing actions, sales history
   dashboard/
     app.py             # Streamlit stub
   utils/
@@ -71,7 +71,7 @@ uv run streamlit run src/dashboard/app.py      # Dashboard (stub)
 2. **Phase 2 (Discovery):** Keepa product_finder -> feature extraction from `product['data']` dict -> weighted scoring -> save to DB. Products with score >= 50 marked `is_underserved=True`.
 3. **Phase 3 (Sourcing):** For each underserved product: enrich UPC via SP-API, get supplier suggestions (OpenAI or rule-based COGS estimation), calculate profitability, select preferred supplier, initialize inventory, generate POs.
 4. **Phase 4 (Repricing):** For each product with inventory + preferred supplier: calculate price floor from supplier cost, fetch Buy Box price via SP-API, undercut by `price_adjustment_amount` ($0.01), clamp to floor, apply via SP-API (or log in `dry_run` mode), record to Performance table. Disables SP-API pricing calls on 403.
-5. **Phase 5 (Forecasting):** Stub - not implemented
+5. **Phase 5 (Forecasting):** Tiered demand prediction per product. Tier 1 (<14 data points): Keepa `estimated_monthly_sales/30`. Tier 2 (14-59): exponential smoothing. Tier 3 (60+): Prophet. Updates inventory forecast fields (`forecasted_stock_30d/60d`, `days_of_supply`, `reorder_point`, `safety_stock`, `needs_reorder`). Auto-generates POs when reorder point breached and no active PO exists. Disables SP-API order calls on 403.
 
 ## Key Configuration (.env)
 
@@ -85,7 +85,6 @@ uv run streamlit run src/dashboard/app.py      # Dashboard (stub)
 
 - SP-API returns 403 on most endpoints (client needs to enable roles: Product Listing, Product Pricing, Product Fees, FBA Inventory, Orders, Feeds)
 - OpenAI key in .env is placeholder — falls back to rule-based supplier estimation
-- Phase 5 is a stub
 - Dashboard is a stub
 - No scheduler implemented (referenced in docs but `scheduler.py` doesn't exist)
 
