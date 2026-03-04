@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from src.database import PurchaseOrder
+from src.models import PurchaseOrder
 
 
 def create_purchase_order(session: Session, po_id: str, asin: str, supplier_id: int,

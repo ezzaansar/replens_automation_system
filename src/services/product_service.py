@@ -4,7 +4,7 @@ from typing import Optional, List
 
 from sqlalchemy.orm import Session
 
-from src.database import Product, Inventory
+from src.models import Product, Inventory
 
 
 def add_product(session: Session, asin: str, title: str, category: str, **kwargs) -> Product:

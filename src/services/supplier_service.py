@@ -4,7 +4,7 @@ from typing import Optional, List
 
 from sqlalchemy.orm import Session
 
-from src.database import Supplier, ProductSupplier
+from src.models import Supplier, ProductSupplier
 
 
 def add_supplier(session: Session, name: str, **kwargs) -> Supplier:

@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from src.database import Performance
+from src.models import Performance
 
 
 def record_performance(session: Session, asin: str, units_sold: int, revenue: Decimal,
