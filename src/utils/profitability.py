@@ -31,9 +31,10 @@ def estimate_amazon_fees(
     )
     referral_fee = price * referral_rate
 
-    # FBA fee based on weight tier
+    # FBA fee based on weight tier (sorted by weight to match smallest qualifying tier)
     fba_fee = Decimal("3.50")  # default: large_standard
-    for tier_name, tier_data in AMAZON_FBA_FEES.items():
+    sorted_tiers = sorted(AMAZON_FBA_FEES.items(), key=lambda t: t[1]["weight_limit"])
+    for tier_name, tier_data in sorted_tiers:
         if weight_lbs <= tier_data["weight_limit"]:
             fba_fee = Decimal(str(tier_data["fee"]))
             break

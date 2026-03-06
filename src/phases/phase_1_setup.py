@@ -39,18 +39,62 @@ def setup_database():
 
 
 def test_amazon_sp_api():
-    """Test the Amazon SP-API connection."""
+    """Test the Amazon SP-API connection using the Sellers API (base role)."""
     try:
         sp_api = get_sp_api()
-        
-        # Try to get inventory summaries as a test
+
         logger.info("Testing Amazon SP-API connection...")
-        summaries = sp_api.get_inventory_summaries()
-        
-        logger.info(f"✓ Amazon SP-API connection successful ({len(summaries)} products found)")
+        participations = sp_api.get_marketplace_participations()
+
+        marketplaces = [p.get("marketplace", {}).get("id", "?") for p in participations]
+        logger.info(f"✓ Amazon SP-API connection successful (marketplaces: {marketplaces})")
         return True
     except Exception as e:
         logger.error(f"✗ Amazon SP-API connection failed: {e}")
+        error_str = str(e).lower()
+        if "unauthorized" in error_str or "403" in error_str or "access" in error_str:
+            logger.error("")
+            logger.error("=" * 70)
+            logger.error("SP-API AUTHORIZATION TROUBLESHOOTING")
+            logger.error("=" * 70)
+            logger.error(
+                "The LWA token exchange succeeded but the API returned 403.\n"
+                "This means your SP-API app exists but is not fully authorized.\n"
+                "\n"
+                "Please check the following in Seller Central:\n"
+                "\n"
+                "  1. APP STATUS\n"
+                "     Seller Central -> Apps & Services -> Develop Apps\n"
+                "     Your app must be 'Published' or 'Authorized', NOT 'Draft'.\n"
+                "\n"
+                "  2. SELF-AUTHORIZATION\n"
+                "     Seller Central -> Apps & Services -> Manage Your Apps\n"
+                "     Click 'Authorize' on your app. This generates the refresh\n"
+                "     token tied to your seller account. Copy it to your .env as\n"
+                "     AMAZON_REFRESH_TOKEN.\n"
+                "\n"
+                "  3. IAM ROLE\n"
+                "     The IAM Role ARN registered with your app must:\n"
+                "     - Still exist in your AWS account\n"
+                "     - Have a trust policy allowing sts:AssumeRole\n"
+                "     - Have the 'execute-api:Invoke' permission\n"
+                "\n"
+                "  4. REFRESH TOKEN\n"
+                "     If you regenerated your app credentials after the initial\n"
+                "     authorization, the old refresh token is invalidated.\n"
+                "     Re-authorize the app and update AMAZON_REFRESH_TOKEN in .env.\n"
+                "\n"
+                "  5. API ROLES\n"
+                "     Seller Central -> Apps & Services -> Develop Apps -> Edit\n"
+                "     Ensure these roles are enabled:\n"
+                "       - Selling Partner Insights (base access)\n"
+                "       - Product Listing    (Phase 3: catalog lookups)\n"
+                "       - Product Pricing    (Phase 4: repricing)\n"
+                "       - Feeds              (Phase 4: price updates)\n"
+                "       - FBA Inventory      (inventory queries)\n"
+                "       - Orders             (Phase 5: sales history)\n"
+            )
+            logger.error("=" * 70)
         return False
 
 
@@ -166,11 +210,11 @@ def main():
     if sp_api_ok and keepa_api_ok:
         logger.info("✓ All systems operational")
     else:
-        logger.warning("⚠ Some API connections failed. System will continue with available APIs.")
         if not sp_api_ok:
-            logger.warning("  - Amazon SP-API: Check app permissions in Seller Central")
+            logger.warning("⚠ Amazon SP-API: Check app permissions in Seller Central")
         if not keepa_api_ok:
-            logger.warning("  - Keepa API: Check your API key")
+            logger.error("✗ Keepa API: Check your API key — Keepa is required for Phase 2 discovery")
+            return False
 
     print_system_status()
     return True

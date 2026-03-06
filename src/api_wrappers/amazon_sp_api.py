@@ -1,7 +1,8 @@
 """
 Amazon Selling Partner API (SP-API) Wrapper
 
-Provides clean, high-level interface to Amazon SP-API for:
+Uses the python-amazon-sp-api library for authentication (LWA + STS role
+assumption + SigV4 signing) and provides a clean, high-level interface for:
 - Fetching product information
 - Getting sales data and orders
 - Managing inventory
@@ -11,453 +12,404 @@ Provides clean, high-level interface to Amazon SP-API for:
 
 import logging
 import threading
-import time
-import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from decimal import Decimal
-import requests
-from requests.auth import HTTPBasicAuth
 
-from src.config import settings, AMAZON_SP_API_ENDPOINTS
+from sp_api.api import (
+    CatalogItems,
+    Feeds,
+    Inventories,
+    Orders,
+    ProductFees,
+    Products,
+    Sellers,
+)
+from sp_api.base import Marketplaces
+from sp_api.base.exceptions import SellingApiException, SellingApiRequestThrottledException
+
+from src.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Map marketplace IDs to sp_api Marketplaces enum
+_MARKETPLACE_MAP: Dict[str, Marketplaces] = {
+    "ATVPDKIKX0DER": Marketplaces.US,
+    "A2EUQ1WTGCTBG2": Marketplaces.CA,
+    "A1AM78C64UM0Y8": Marketplaces.MX,
+    "A1F83G8C2ARO7P": Marketplaces.GB,
+    "A13V1IB3VIYZZH": Marketplaces.FR,
+    "A1PA6795UKMFR9": Marketplaces.DE,
+    "APJ6JRA9NG5V4": Marketplaces.IT,
+    "A1RKKUPIHCS9HS": Marketplaces.ES,
+    "A1VC38T7YXB528": Marketplaces.JP,
+    "A21TJRUUN4KGV": Marketplaces.IN,
+    "A2Q3Y263D00KWC": Marketplaces.BR,
+    "A39IBJ37TRP1C6": Marketplaces.AU,
+}
 
 
 class AmazonSPAPI:
     """
     Wrapper for Amazon Selling Partner API.
-    
-    Handles authentication, rate limiting, and provides high-level methods
-    for common operations.
+
+    Delegates authentication (LWA tokens, STS role assumption, SigV4 signing)
+    to the python-amazon-sp-api library.
     """
-    
+
     def __init__(self):
         """Initialize the SP-API wrapper."""
-        self.client_id = settings.amazon_client_id
-        self.client_secret = settings.amazon_client_secret
-        self.refresh_token = settings.amazon_refresh_token
-        self.region = settings.amazon_region
         self.seller_id = settings.amazon_seller_id
         self.marketplace_id = settings.amazon_marketplace_id
 
-        self.base_url = AMAZON_SP_API_ENDPOINTS[self.region]
-        self.access_token = None
-        self.token_expiry = None
-        
-        self.rate_limit = settings.amazon_rate_limit
-        self.last_request_time = 0
-        
-        # Authenticate on initialization
-        self._refresh_access_token()
-    
-    # ========================================================================
-    # AUTHENTICATION
-    # ========================================================================
-    
-    def _refresh_access_token(self):
-        """Refresh the access token using the refresh token."""
-        auth_url = "https://api.amazon.com/auth/o2/token"
-        
-        payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": self.refresh_token,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-        }
-        
+        self._credentials = dict(
+            refresh_token=settings.amazon_refresh_token,
+            lwa_app_id=settings.amazon_client_id,
+            lwa_client_secret=settings.amazon_client_secret,
+        )
+        self._marketplace = _MARKETPLACE_MAP.get(
+            self.marketplace_id, Marketplaces.US
+        )
+
+        # Verify credentials are valid by creating a lightweight client
         try:
-            response = requests.post(auth_url, data=payload, timeout=settings.api_timeout)
-            response.raise_for_status()
-            
-            data = response.json()
-            self.access_token = data["access_token"]
-            expires_in = data.get("expires_in", 3600)
-            self.token_expiry = datetime.utcnow() + timedelta(seconds=expires_in - 60)
-            
-            logger.info("✓ SP-API access token refreshed")
-        except (requests.RequestException, KeyError, ValueError) as e:
-            logger.exception(f"✗ Failed to refresh SP-API token: {e}")
+            Sellers(credentials=self._credentials, marketplace=self._marketplace)
+            logger.info("SP-API credentials accepted")
+        except Exception as e:
+            logger.error("SP-API credential setup failed: %s", e)
             raise
-    
-    def _ensure_valid_token(self):
-        """Ensure the access token is still valid, refresh if needed."""
-        if self.token_expiry and datetime.utcnow() >= self.token_expiry:
-            self._refresh_access_token()
-    
+
+    def _client(self, api_class, **kwargs):
+        """Create an SP-API client instance with shared credentials."""
+        return api_class(
+            credentials=self._credentials,
+            marketplace=self._marketplace,
+            **kwargs,
+        )
+
+    def _handle_sp_error(self, exc: Exception, context: str) -> None:
+        """Log SP-API errors consistently."""
+        if isinstance(exc, SellingApiRequestThrottledException):
+            logger.warning("SP-API throttled during %s: %s", context, exc)
+        elif isinstance(exc, SellingApiException):
+            logger.error("SP-API error during %s: [%s] %s", context, exc.code, exc)
+        else:
+            logger.error("Unexpected error during %s: %s", context, exc)
+
     # ========================================================================
-    # RATE LIMITING
+    # CONNECTIVITY TEST
     # ========================================================================
-    
-    def _apply_rate_limit(self):
-        """Apply rate limiting to API requests."""
-        elapsed = time.time() - self.last_request_time
-        min_interval = 1.0 / self.rate_limit
-        
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
-        
-        self.last_request_time = time.time()
-    
-    # ========================================================================
-    # HTTP METHODS
-    # ========================================================================
-    
-    def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-        """
-        Make an authenticated request to the SP-API.
-        
-        Args:
-            method: HTTP method (GET, POST, PATCH, etc.)
-            endpoint: API endpoint path
-            **kwargs: Additional arguments to pass to requests
-        
-        Returns:
-            Response JSON data
-        """
-        self._ensure_valid_token()
-        self._apply_rate_limit()
-        
-        url = f"{self.base_url}{endpoint}"
-        headers = {
-            "x-amz-access-token": self.access_token,
-            "Content-Type": "application/json",
-        }
-        
-        if "headers" in kwargs:
-            headers.update(kwargs.pop("headers"))
-        
-        retries = 0
-        while retries < settings.api_retries:
-            try:
-                response = requests.request(
-                    method,
-                    url,
-                    headers=headers,
-                    timeout=settings.api_timeout,
-                    **kwargs
-                )
-                
-                # Handle rate limiting
-                if response.status_code == 429:
-                    retry_after = int(response.headers.get("Retry-After", 60))
-                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                    time.sleep(retry_after)
-                    retries += 1
-                    continue
-                
-                response.raise_for_status()
-                return response.json()
-            
-            except requests.exceptions.RequestException as e:
-                retries += 1
-                if retries >= settings.api_retries:
-                    logger.error(f"✗ API request failed after {settings.api_retries} retries: {e}")
-                    raise
-                
-                backoff = settings.api_backoff_factor ** retries
-                logger.warning(f"Request failed. Retry {retries}/{settings.api_retries} after {backoff}s")
-                time.sleep(backoff)
-        
-        raise Exception("Max retries exceeded")
-    
+
+    def get_marketplace_participations(self) -> List[Dict[str, Any]]:
+        """Test connectivity using the Sellers API (requires only base SP-API role)."""
+        try:
+            resp = self._client(Sellers).get_marketplace_participation()
+            return resp.payload or []
+        except Exception as exc:
+            self._handle_sp_error(exc, "get_marketplace_participations")
+            raise
+
     # ========================================================================
     # PRODUCT INFORMATION
     # ========================================================================
-    
+
     def get_catalog_item(self, asin: str) -> Dict[str, Any]:
         """
         Get catalog item details for an ASIN.
-        
+
         Args:
             asin: Amazon Standard Identification Number
-        
+
         Returns:
-            Product details
+            Product details dict
         """
-        endpoint = f"/catalog/2022-04-01/items/{asin}"
-        params = {
-            "marketplaceIds": [self.marketplace_id],
-            "includedData": ["attributes", "identifiers", "images", "productTypes", "summaries"],
-        }
-        
-        return self._make_request("GET", endpoint, params=params)
-    
+        try:
+            resp = self._client(
+                CatalogItems, version="2022-04-01"
+            ).get_catalog_item(
+                asin=asin,
+                includedData="attributes,identifiers,images,productTypes,summaries",
+            )
+            return resp.payload or {}
+        except Exception as exc:
+            self._handle_sp_error(exc, f"get_catalog_item({asin})")
+            raise
+
     def get_product_pricing(self, asin: str) -> Dict[str, Any]:
         """
-        Get current pricing information for a product.
-        
+        Get current competitive pricing information for a product.
+
         Args:
             asin: Product ASIN
-        
+
         Returns:
             Pricing data including Buy Box price
         """
-        endpoint = "/products/pricing/v0/competitivePrice"
-        params = {
-            "MarketplaceId": self.marketplace_id,
-            "Asins": asin,
-            "ItemType": "Asin",
-        }
-
-        return self._make_request("GET", endpoint, params=params)
+        try:
+            resp = self._client(Products).get_competitive_pricing_for_asins(
+                asin_list=[asin],
+            )
+            return resp.payload or {}
+        except Exception as exc:
+            self._handle_sp_error(exc, f"get_product_pricing({asin})")
+            raise
 
     def get_my_price(self, asin: str) -> Dict[str, Any]:
         """
         Get your current price for a product.
-        
+
         Args:
             asin: Product ASIN
-        
+
         Returns:
             Your pricing information
         """
-        endpoint = "/products/pricing/v0/myPrice"
-        params = {
-            "MarketplaceId": self.marketplace_id,
-            "Asins": asin,
-            "ItemType": "Asin",
-        }
-
-        return self._make_request("GET", endpoint, params=params)
+        try:
+            resp = self._client(Products).get_product_pricing_for_asins(
+                asin_list=[asin],
+            )
+            return resp.payload or {}
+        except Exception as exc:
+            self._handle_sp_error(exc, f"get_my_price({asin})")
+            raise
 
     # ========================================================================
     # INVENTORY MANAGEMENT
     # ========================================================================
-    
+
     def get_inventory_summaries(self) -> List[Dict[str, Any]]:
         """
         Get inventory summaries for all your SKUs.
-        
+
         Returns:
             List of inventory summaries
         """
-        endpoint = "/fba/inventory/v1/summaries"
-        params = {
-            "marketplaceIds": [self.marketplace_id],
-            "granularityType": "Marketplace",
-        }
+        try:
+            resp = self._client(Inventories).get_inventory_summary_marketplace(
+                granularityType="Marketplace",
+                granularityId=self.marketplace_id,
+            )
+            return resp.payload.get("inventorySummaries", [])
+        except Exception as exc:
+            self._handle_sp_error(exc, "get_inventory_summaries")
+            raise
 
-        response = self._make_request("GET", endpoint, params=params)
-        return response.get("inventorySummaries", [])
-    
     def get_inventory_summary(self, sku: str) -> Optional[Dict[str, Any]]:
         """
         Get inventory summary for a specific SKU.
-        
+
         Args:
             sku: Your product SKU
-        
+
         Returns:
             Inventory summary or None if not found
         """
-        endpoint = f"/fba/inventory/v1/summaries/{sku}"
-        params = {
-            "marketplaceIds": [self.marketplace_id],
-            "granularityType": "Marketplace",
-        }
-
         try:
-            response = self._make_request("GET", endpoint, params=params)
-            return response.get("inventorySummaries", [None])[0]
-        except (requests.RequestException, KeyError, IndexError) as e:
-            logger.exception(f"Failed to get inventory summary for SKU {sku}: {e}")
+            resp = self._client(Inventories).get_inventory_summary_marketplace(
+                granularityType="Marketplace",
+                granularityId=self.marketplace_id,
+                sellerSkus=[sku],
+            )
+            summaries = resp.payload.get("inventorySummaries", [])
+            return summaries[0] if summaries else None
+        except Exception as exc:
+            self._handle_sp_error(exc, f"get_inventory_summary({sku})")
             return None
-    
+
     # ========================================================================
     # PRICING UPDATES
     # ========================================================================
-    
+
     def update_price(self, sku: str, price: Decimal) -> bool:
         """
-        Update the price for a product.
-        
+        Update the price for a product via the Feeds API.
+
         Args:
             sku: Your product SKU
             price: New price
-        
+
         Returns:
-            True if successful
+            True if the feed was submitted successfully
         """
-        endpoint = "/products/pricing/v2/feedDocuments"
-        
-        # Create feed document
-        feed_data = {
-            "feedType": "POST_PRODUCT_PRICING_DATA",
-            "marketplaceIds": [self.marketplace_id],
-            "inputFeedDocumentId": None,
-            "feedOptions": {},
-            "documentSpecVersion": "2.0",
-        }
-        
-        # Create pricing feed using ElementTree to safely escape values
+        import xml.etree.ElementTree as ET
+
+        # Build pricing feed XML
         envelope = ET.Element("AmazonEnvelope")
         envelope.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
         envelope.set("xsi:noNamespaceSchemaLocation", "amzn-envelope.xsd")
 
         header = ET.SubElement(envelope, "Header")
-        doc_version = ET.SubElement(header, "DocumentVersion")
-        doc_version.text = "1.01"
-        merchant_id = ET.SubElement(header, "MerchantIdentifier")
-        merchant_id.text = str(self.seller_id)
+        ET.SubElement(header, "DocumentVersion").text = "1.01"
+        ET.SubElement(header, "MerchantIdentifier").text = str(self.seller_id)
 
-        msg_type = ET.SubElement(envelope, "MessageType")
-        msg_type.text = "Price"
+        ET.SubElement(envelope, "MessageType").text = "Price"
 
         message = ET.SubElement(envelope, "Message")
-        msg_id = ET.SubElement(message, "MessageID")
-        msg_id.text = "1"
-        op_type = ET.SubElement(message, "OperationType")
-        op_type.text = "Update"
+        ET.SubElement(message, "MessageID").text = "1"
+        ET.SubElement(message, "OperationType").text = "Update"
 
         price_elem = ET.SubElement(message, "Price")
-        sku_elem = ET.SubElement(price_elem, "SKU")
-        sku_elem.text = str(sku)
+        ET.SubElement(price_elem, "SKU").text = str(sku)
         std_price = ET.SubElement(price_elem, "StandardPrice")
         std_price.set("currency", "USD")
         std_price.text = str(price)
 
         ET.indent(envelope, space="    ")
-        pricing_data = '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+        pricing_xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
             envelope, encoding="unicode"
         )
-        
+
         try:
-            # This is a simplified example. Full implementation would involve:
-            # 1. Creating a feed document
-            # 2. Uploading the feed content
-            # 3. Submitting the feed
-            logger.info(f"✓ Price updated for {sku}: ${price}")
+            resp = self._client(Feeds).submit_feed(
+                "POST_PRODUCT_PRICING_DATA",
+                pricing_xml.encode("utf-8"),
+                content_type="text/xml; charset=UTF-8",
+            )
+            feed_id = resp.payload.get("feedId") if resp.payload else None
+            logger.info(
+                "Price update feed submitted for %s: $%s (feedId=%s)",
+                sku, price, feed_id,
+            )
             return True
-        except (requests.RequestException, ET.ParseError, ValueError) as e:
-            logger.exception(f"✗ Failed to update price for {sku}: {e}")
+        except Exception as exc:
+            self._handle_sp_error(exc, f"update_price({sku})")
             return False
-    
+
     # ========================================================================
     # ORDERS
     # ========================================================================
-    
-    def get_orders(self, created_after: Optional[datetime] = None, 
-                   order_statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+
+    def get_orders(
+        self,
+        created_after: Optional[datetime] = None,
+        order_statuses: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Get orders from the last 90 days.
-        
+        Get orders.
+
         Args:
             created_after: Only get orders after this date
             order_statuses: Filter by order status
-        
+
         Returns:
             List of orders
         """
         if not created_after:
             created_after = datetime.utcnow() - timedelta(days=7)
-        
+
         if not order_statuses:
-            order_statuses = ["Unshipped", "PartiallyShipped", "Shipped", "Cancelled", "Unfulfillable"]
-        
-        endpoint = "/orders/v0/orders"
-        params = {
-            "MarketplaceId": self.marketplace_id,
-            "CreatedAfter": created_after.isoformat(),
-            "OrderStatuses": ",".join(order_statuses),
-        }
-        
-        response = self._make_request("GET", endpoint, params=params)
-        return response.get("Orders", [])
-    
+            order_statuses = [
+                "Unshipped", "PartiallyShipped", "Shipped",
+                "Cancelled", "Unfulfillable",
+            ]
+
+        try:
+            resp = self._client(Orders).get_orders(
+                CreatedAfter=created_after.isoformat(),
+                OrderStatuses=order_statuses,
+                MarketplaceIds=[self.marketplace_id],
+            )
+            return resp.payload.get("Orders", [])
+        except Exception as exc:
+            self._handle_sp_error(exc, "get_orders")
+            raise
+
     def get_order_items(self, order_id: str) -> List[Dict[str, Any]]:
         """
         Get items in an order.
-        
+
         Args:
             order_id: Amazon order ID
-        
+
         Returns:
             List of order items
         """
-        endpoint = f"/orders/v0/orders/{order_id}/orderitems"
-        params = {"MarketplaceId": self.marketplace_id}
-        
-        response = self._make_request("GET", endpoint, params=params)
-        return response.get("OrderItems", [])
-    
+        try:
+            resp = self._client(Orders).get_order_items(order_id=order_id)
+            return resp.payload.get("OrderItems", [])
+        except Exception as exc:
+            self._handle_sp_error(exc, f"get_order_items({order_id})")
+            raise
+
     # ========================================================================
     # SALES DATA
     # ========================================================================
-    
-    def get_sales_data(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+
+    def get_sales_data(
+        self, start_date: datetime, end_date: datetime
+    ) -> Dict[str, Any]:
         """
-        Get sales data for a date range.
-        
+        Get sales data for a date range (placeholder — needs Reports API).
+
         Args:
             start_date: Start date for sales data
             end_date: End date for sales data
-        
+
         Returns:
             Sales data
         """
-        # This would typically use the Reports API
-        # For now, return a placeholder
-        logger.info(f"Fetching sales data from {start_date} to {end_date}")
+        logger.info("Fetching sales data from %s to %s", start_date, end_date)
         return {}
-    
+
     # ========================================================================
     # FEES
     # ========================================================================
-    
-    def estimate_fees(self, asin: str, price: Decimal, quantity: int = 1) -> Dict[str, Decimal]:
+
+    def estimate_fees(
+        self, asin: str, price: Decimal, quantity: int = 1
+    ) -> Dict[str, Decimal]:
         """
         Estimate Amazon fees for a product.
-        
+
         Args:
             asin: Product ASIN
             price: Selling price
             quantity: Number of units
-        
+
         Returns:
             Dictionary with fee breakdown
         """
-        endpoint = "/products/fees/v0/estimateFeesForASIN"
-        params = {
-            "MarketplaceId": self.marketplace_id,
-            "Asins": asin,
-            "PriceToEstimateFees": {
-                "ListingPrice": {
-                    "CurrencyCode": "USD",
-                    "Amount": str(price),
-                }
-            }
-        }
-        
         try:
-            response = self._make_request("POST", endpoint, json=params)
-            
-            # Extract fees from response
-            fees = response.get("FeesEstimate", {}).get("FeesEstimateList", [{}])[0]
-            
+            resp = self._client(ProductFees).get_product_fees_estimate_for_asin(
+                asin=asin,
+                price=float(price),
+                currency="USD",
+                is_fba=True,
+            )
+            fee_detail = resp.payload or {}
+            estimate = (
+                fee_detail
+                .get("FeesEstimateResult", {})
+                .get("FeesEstimate", {})
+            )
+            fee_list = estimate.get("FeeDetailList", [])
+
+            referral = Decimal("0")
+            fba = Decimal("0")
+            closing = Decimal("0")
+            for fee in fee_list:
+                fee_type = fee.get("FeeType", "")
+                amount = Decimal(str(fee.get("FinalFee", {}).get("Amount", 0)))
+                if fee_type == "ReferralFee":
+                    referral = amount
+                elif fee_type == "FBAFees":
+                    fba = amount
+                elif fee_type == "VariableClosingFee":
+                    closing = amount
+
             return {
-                "referral_fee": Decimal(fees.get("ReferralFee", {}).get("Amount", 0)),
-                "fba_fee": Decimal(fees.get("FBAFees", {}).get("Amount", 0)),
-                "variable_closing_fee": Decimal(fees.get("VariableClosingFee", {}).get("Amount", 0)),
+                "referral_fee": referral,
+                "fba_fee": fba,
+                "variable_closing_fee": closing,
             }
-        except requests.exceptions.HTTPError as e:
-            logger.exception(f"✗ Failed to estimate fees for {asin}: {e}")
-            # Re-raise 403 errors so callers can detect permission issues
-            # and switch to local fee estimation
-            if e.response is not None and e.response.status_code == 403:
+        except SellingApiException as exc:
+            self._handle_sp_error(exc, f"estimate_fees({asin})")
+            if exc.code == 403:
                 raise
-            return {
-                "referral_fee": Decimal(0),
-                "fba_fee": Decimal(0),
-                "variable_closing_fee": Decimal(0),
-            }
-        except (requests.RequestException, KeyError, IndexError, ValueError) as e:
-            logger.exception(f"✗ Failed to estimate fees for {asin}: {e}")
-            return {
-                "referral_fee": Decimal(0),
-                "fba_fee": Decimal(0),
-                "variable_closing_fee": Decimal(0),
-            }
+            return {"referral_fee": Decimal(0), "fba_fee": Decimal(0), "variable_closing_fee": Decimal(0)}
+        except Exception as exc:
+            self._handle_sp_error(exc, f"estimate_fees({asin})")
+            return {"referral_fee": Decimal(0), "fba_fee": Decimal(0), "variable_closing_fee": Decimal(0)}
 
 
 # Singleton instance

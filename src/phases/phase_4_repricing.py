@@ -84,8 +84,8 @@ class RepricingEngine:
         except Exception as exc:
             # A 403 means the SP-API pricing role is not enabled — disable
             # pricing calls for the remainder of this run.
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status == 403:
+            status = getattr(exc, "code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 403 or "403" in str(exc):
                 logger.warning("SP-API returned 403 on pricing — disabling pricing calls for this run")
                 self._sp_api_pricing_available = False
             else:
@@ -93,9 +93,11 @@ class RepricingEngine:
             return None
 
         # Parse Buy Box price from competitive pricing response
+        # comp_data is the payload list directly (not wrapped in {"payload": ...})
         buy_box_price = None
         try:
-            for item in comp_data.get("payload", []):
+            items = comp_data if isinstance(comp_data, list) else [comp_data]
+            for item in items:
                 for comp_price in item.get("Product", {}).get("CompetitivePricing", {}).get("CompetitivePrices", []):
                     if comp_price.get("CompetitivePriceId") == "1":  # Buy Box
                         amount = comp_price.get("Price", {}).get("LandedPrice", {}).get("Amount")
@@ -109,7 +111,8 @@ class RepricingEngine:
         our_price = None
         buy_box_is_ours = False
         try:
-            for item in my_data.get("payload", []):
+            items = my_data if isinstance(my_data, list) else [my_data]
+            for item in items:
                 offers = item.get("Product", {}).get("Offers", [])
                 if offers:
                     amount = offers[0].get("RegularPrice", {}).get("Amount")

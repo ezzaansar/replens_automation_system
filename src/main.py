@@ -31,15 +31,21 @@ def main():
 
     # Phase 3: Sourcing & Procurement
     logger.info("\n--- Running Phase 3: Sourcing & Procurement ---")
-    phase_3_sourcing.main()
+    if not phase_3_sourcing.main():
+        logger.error("Phase 3 failed. Aborting.")
+        sys.exit(1)
 
     # Phase 4: Dynamic Repricing
     logger.info("\n--- Running Phase 4: Dynamic Repricing ---")
-    phase_4_repricing.main()
+    if not phase_4_repricing.main():
+        logger.error("Phase 4 failed. Aborting.")
+        sys.exit(1)
 
     # Phase 5: Inventory Forecasting
     logger.info("\n--- Running Phase 5: Inventory Forecasting ---")
-    phase_5_forecasting.main()
+    if not phase_5_forecasting.main():
+        logger.error("Phase 5 failed. Aborting.")
+        sys.exit(1)
 
     logger.info("\n✓ All phases completed successfully!")
 

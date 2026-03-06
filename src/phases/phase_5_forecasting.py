@@ -111,8 +111,8 @@ class ForecastingEngine:
                         daily[day_key] = daily.get(day_key, 0) + qty
             return sorted(daily.items())
         except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status == 403:
+            status = getattr(exc, "code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 403 or "403" in str(exc):
                 logger.warning("SP-API returned 403 on orders — disabling order fetching for this run")
                 self._sp_api_orders_available = False
             else:
